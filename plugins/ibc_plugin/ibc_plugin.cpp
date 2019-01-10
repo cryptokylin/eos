@@ -239,6 +239,8 @@ namespace eosio { namespace ibc {
       void new_prod_blk_num_insert( uint32_t num );
       optional<ibc_trx_rich_info> get_ibc_trx_rich_info( uint32_t block_time_slot, transaction_id_type trx_id, uint64_t table_id );
 
+      void check_if_remove_old_data_in_ibc_contracts();
+
       void ibc_core_checker( );
       void start_ibc_core_timer( );
 
@@ -680,9 +682,11 @@ namespace eosio { namespace ibc {
       void chain_init( const lwc_init_message& msg );
       void pushsection( const lwc_section_data_message& msg );
       void blockmerkle( const blockroot_merkle_type& data );
+      void rmfirstsctn();
 
       // tables
       optional<section_type>              get_sections_tb_reverse_nth_section( uint64_t nth = 0 ) const;
+      uint32_t                            get_sections_tb_size() const;
       optional<block_header_state_type>   get_chaindb_tb_bhs_by_block_num( uint64_t num ) const;
       block_id_type                       get_chaindb_tb_block_id_by_block_num( uint64_t num ) const;
       optional<global_state_ibc_chain>    get_global_singleton() const;
@@ -743,6 +747,26 @@ namespace eosio { namespace ibc {
          return result;
       }
       return optional<section_type>();
+   }
+
+   uint32_t ibc_chain_contract::get_sections_tb_size() const {
+      chain_apis::read_only::get_table_rows_params par;
+      par.json = true;  // must be true
+      par.code = account;
+      par.scope = account.to_string();
+      par.table = N(sections);
+      par.table_key = "primary_key";
+      par.lower_bound = to_string(0);
+      par.upper_bound = "";
+      par.limit = 10;
+      par.key_type = "i64";
+      par.index_position = "1";
+
+      try {
+         auto result = my_impl->chain_plug->get_read_only_api().get_table_rows( par );
+         return result.rows.size();
+      } FC_LOG_AND_DROP()
+      return 0;
    }
 
    optional<block_header_state_type> ibc_chain_contract::get_chaindb_tb_bhs_by_block_num( uint64_t num ) const {
@@ -845,6 +869,16 @@ namespace eosio { namespace ibc {
       push_action( *actn );
    }
 
+   void ibc_chain_contract::rmfirstsctn(){
+      auto actn = get_action( account, N(rmfirstsctn), vector<permission_level>{{ my_impl->relay, config::active_name}}, mvo()
+         ("relay",             my_impl->relay));
+
+      if ( ! actn.valid() ){
+         elog("newsection: get action failed");
+         return;
+      }
+      push_action( *actn );
+   }
 
    // --------------- ibc_token_contract ---------------
    class ibc_token_contract {
@@ -870,11 +904,17 @@ namespace eosio { namespace ibc {
       optional<cash_action_params>     get_cash_action_params( std::vector<char> packed_trx_receipt );
 
       transaction_id_type last_origtrx_pushed;  // note: update this even push failed
+
+      // recurse actions
       void push_cash_recurse( int index, const std::shared_ptr<std::vector<cash_action_params>>& params, uint32_t start_seq_num );
       void push_cash_trxs( const std::vector<ibc_trx_rich_info>& params, uint32_t start_seq_num );
 
       void push_cashconfirm_recurse( int index, const std::shared_ptr<std::vector<cashconfirm_action_params>>& params );
       void push_cashconfirm_trxs( const std::vector<ibc_trx_rich_info>& params, uint64_t start_seq_num );
+
+      void push_rborrm_recurse( int index, const std::shared_ptr<std::vector<transaction_id_type>>& params, name action_name);
+      void rollback( const std::vector<transaction_id_type> trxs );
+      void rmunablerb( const std::vector<transaction_id_type> trxs );
 
       optional<memo_info_type> get_memo_info( const string& memo );
 
@@ -1128,7 +1168,7 @@ namespace eosio { namespace ibc {
             elog("push cash transaction failed, index ${i}",("i",index));
          } else {
             auto trx_id = result.get<chain_apis::read_write::push_transaction_results>().transaction_id;
-            ilog("pushed cash transaction: ${id}", ( "id", trx_id ));
+            ilog("pushed cash transaction: ${id}, index ${idx}", ( "id", trx_id )("idx", index));
             next_seq_num += 1;
          }
 
@@ -1218,7 +1258,7 @@ namespace eosio { namespace ibc {
             return;
          } else {
             auto trx_id = result.get<chain_apis::read_write::push_transaction_results>().transaction_id;
-            ilog("pushed cashconfirm transaction: ${id}", ( "id", trx_id ));
+            ilog("pushed cashconfirm transaction: ${id}, index ${idx}", ( "id", trx_id )("idx", index));
          }
 
          int next_index = index + 1;
@@ -1331,6 +1371,65 @@ namespace eosio { namespace ibc {
       push_action( *actn );
    }
 
+   void ibc_token_contract::push_rborrm_recurse( int index, const std::shared_ptr<std::vector<transaction_id_type>>& params, name action_name){
+      auto next = [=](const fc::static_variant<fc::exception_ptr, chain_apis::read_write::push_transaction_results>& result) {
+         if (result.contains<fc::exception_ptr>()) {
+            try {
+               result.get<fc::exception_ptr>()->dynamic_rethrow_exception();
+            } FC_LOG_AND_DROP()
+            ilog("push rollback transaction failed, index ${idx}", ("idx", index));
+         } else {
+            auto trx_id = result.get<chain_apis::read_write::push_transaction_results>().transaction_id;
+            ilog("pushed rollback transaction: ${id}, index ${idx}", ( "id", trx_id )("idx", index));
+         }
+
+         int next_index = index + 1;
+         if (next_index < params->size()) {
+            push_rborrm_recurse( next_index, params, action_name );
+         }
+      };
+
+      auto trx_id = params->at(index);
+      auto actn = get_action( account, action_name, vector<permission_level>{{ my_impl->relay, config::active_name}}, mvo()
+         ("trx_id",         trx_id)
+         ("relay",          my_impl->relay));
+
+      if ( ! actn.valid() ){
+         elog("newsection: get action failed");
+         return;
+      }
+
+      auto trx_opt = generate_signed_transaction_from_action( *actn );
+      if ( ! trx_opt.valid() ){
+         elog("generate_signed_transaction_from_action failed");
+         return;
+      }
+      my_impl->chain_plug->get_read_write_api().push_transaction_v2( fc::variant_object(mvo(packed_transaction(*trx_opt))), next );
+   }
+
+   void ibc_token_contract::rollback( const std::vector<transaction_id_type> trxs ){
+      if ( trxs.empty() ){
+         return;
+      }
+
+      try {
+         EOS_ASSERT( trxs.size() <= 1000, too_many_tx_at_once, "Attempt to push too many transactions at once" );
+         auto params_copy = std::make_shared<std::vector<transaction_id_type>>(trxs.begin(), trxs.end());
+         push_rborrm_recurse( 0, params_copy, N(rollback) );
+      } FC_LOG_AND_DROP()
+   }
+
+   void ibc_token_contract::rmunablerb( const std::vector<transaction_id_type> trxs ){
+      if ( trxs.empty() ){
+         return;
+      }
+
+      try {
+         EOS_ASSERT( trxs.size() <= 1000, too_many_tx_at_once, "Attempt to push too many transactions at once" );
+         auto params_copy = std::make_shared<std::vector<transaction_id_type>>(trxs.begin(), trxs.end());
+         push_rborrm_recurse( 0, params_copy, N(rmunablerb) );
+      } FC_LOG_AND_DROP()
+   }
 
    // --------------- connection ---------------
    connection::connection(string endpoint)
@@ -2168,11 +2267,9 @@ namespace eosio { namespace ibc {
          request.table = N(cashtrxs);
          if (local_cashtrxs.size() == 0) {
             request.range = msg.cashtrxs_table_seq_num_range;
-            send_all( request );
          } else if (local_cashtrxs.rbegin()->table_id < msg.cashtrxs_table_seq_num_range.second) {
             request.range.first = local_cashtrxs.rbegin()->table_id + 1;
             request.range.second = msg.cashtrxs_table_seq_num_range.second;
-            send_all( request );
          }
          if ( request.range != range_type() ) {
             for( auto &c : connections) {
@@ -2210,11 +2307,11 @@ namespace eosio { namespace ibc {
          return;
       }
       if ( rq_length >= MaxSectionLength && safe_blk_num - msg.start_block_num < MaxSectionLength ){
-         ilog("have not enough data");
+         // ilog("have not enough data");
          return;
       }
       if  ( rq_length < MaxSectionLength && msg.end_block_num > safe_blk_num ) {
-         ilog("have not enough data");
+         // ilog("have not enough data");
          return;
       }
 
@@ -2820,6 +2917,62 @@ namespace eosio { namespace ibc {
       return trx_info;
    }
 
+   void ibc_plugin_impl::check_if_remove_old_data_in_ibc_contracts(){
+
+      // ---- ibc.chain ----
+      uint32_t size = chain_contract->get_sections_tb_size();
+      if ( size >=3  ){
+         chain_contract->rmfirstsctn();
+      }
+
+      // ---- ibc.token ----
+      uint32_t last_finished_trx_block_time_slot = 0;
+      auto gm_opt = token_contract->get_global_mutable_singleton();
+      if ( gm_opt.valid() ){
+         last_finished_trx_block_time_slot = gm_opt->last_finished_trx_block_time_slot;
+      } else {
+         elog("get_global_mutable_singleton failed");
+         return;
+      }
+
+      if ( last_finished_trx_block_time_slot == 0 ){
+         return;
+      }
+
+      uint32_t count = 0;
+      range_type range = token_contract->get_table_origtrxs_id_range();
+      if ( range == range_type() ){
+         return;
+      }
+
+      std::vector<transaction_id_type> to_rmunablerb;
+      std::vector<transaction_id_type> to_rollback;
+
+      for ( uint64_t i = range.first; i < range.second ; ++i ){
+         auto trx_opt = token_contract->get_table_origtrxs_trx_info_by_id( i );
+         if ( trx_opt.valid() ){
+            if ( trx_opt->block_time_slot + 105 < last_finished_trx_block_time_slot ){
+               to_rmunablerb.push_back( trx_opt->trx_id );
+               continue;
+            }
+
+            if ( trx_opt->block_time_slot + 2 < last_finished_trx_block_time_slot ){
+               to_rollback.push_back( trx_opt->trx_id );
+            } else {
+               break;
+            }
+         }
+      }
+
+      if ( ! to_rmunablerb.empty() ){
+         token_contract->rmunablerb( to_rmunablerb );
+      }
+
+      if ( ! to_rollback.empty() ){
+         token_contract->rollback( to_rollback );
+      }
+   }
+
    /**
     * This function implements the core ibc logic of the plugin
     */
@@ -2830,6 +2983,8 @@ namespace eosio { namespace ibc {
          token_contract->get_contract_state();
          return;
       }
+
+      check_if_remove_old_data_in_ibc_contracts();
 
       ///< ---- step one: let lwcls in ibc.chain reach its minimum length ---- >///
 
@@ -2884,6 +3039,9 @@ namespace eosio { namespace ibc {
 
       ///< ---- step two: push all transactions which should validate within this lwcls first to lib block ---- >///
 
+      static const uint32_t max_push_orig_trxs_per_time = 30;
+      static const uint32_t max_push_cash_trxs_per_time = 50;
+
       std::vector<ibc_trx_rich_info> orig_trxs_to_push;
       std::vector<ibc_trx_rich_info> cash_trxs_to_push;
       if ( lwcls.valid ){
@@ -2915,7 +3073,14 @@ namespace eosio { namespace ibc {
          }
 
          if ( ! orig_trxs_to_push.empty() ){
-            token_contract->push_cash_trxs( orig_trxs_to_push, range.second + 1 );  // todo: increase robustness, retry when failed.
+            std::vector<ibc_trx_rich_info> to_push;
+            if ( orig_trxs_to_push.size() > max_push_orig_trxs_per_time ){
+               to_push = std::vector<ibc_trx_rich_info>( orig_trxs_to_push.begin(), orig_trxs_to_push.begin() + max_push_orig_trxs_per_time );
+            } else {
+               to_push = orig_trxs_to_push;
+            }
+            ilog("---------orig_trxs_to_push to push size ${n}",("n",to_push.size()));
+            token_contract->push_cash_trxs( to_push, range.second + 1 );  // todo: increase robustness, retry when failed.
          }
 
          // --- local_cashtrxs ---
@@ -2932,7 +3097,14 @@ namespace eosio { namespace ibc {
          }
 
          if ( !cash_trxs_to_push.empty() ){
-            token_contract->push_cashconfirm_trxs( cash_trxs_to_push, last_cash_seq_num + 1 );
+            std::vector<ibc_trx_rich_info> to_push;
+            if ( cash_trxs_to_push.size() > max_push_cash_trxs_per_time ){
+               to_push = std::vector<ibc_trx_rich_info>( cash_trxs_to_push.begin(), cash_trxs_to_push.begin() + max_push_cash_trxs_per_time );
+            } else {
+               to_push = cash_trxs_to_push;
+            }
+            ilog("---------cash_trxs_to_push to push size ${n}",("n",to_push.size()));
+            token_contract->push_cashconfirm_trxs( to_push, last_cash_seq_num + 1 );
          }
       }
 
