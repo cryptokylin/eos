@@ -57,8 +57,10 @@ namespace eosio { namespace ibc {
    namespace bip = boost::interprocess;
 
    // consts
-   const static uint32_t MaxSectionLength = 30;
-   const static uint32_t MinDepth = 50;   // =12*4+2, never access blocks within this depth
+   const static uint32_t MaxSendSectionLength = 30;
+   const static uint32_t MinDepth = 20;   // =12*4+2, never access blocks within this depth
+   const static uint32_t DiffOfTrxBeforeMinDepth = 10;
+   const static uint32_t BPScheduleReplaceMinLength = 330;  // important para, 330 > 325, safer
    const static uint32_t BlocksPerSecond = 2;
    const static uint32_t MaxLocalOrigtrxsCache = 100*1000;
    const static uint32_t MaxLocalCashtrxsCache = 100*1000;
@@ -159,7 +161,7 @@ namespace eosio { namespace ibc {
       boost::asio::steady_timer::duration    keepalive_interval{std::chrono::seconds{5}};
 
       unique_ptr<boost::asio::steady_timer>  ibc_heartbeat_timer;
-      boost::asio::steady_timer::duration    ibc_heartbeat_interval{std::chrono::seconds{5}};
+      boost::asio::steady_timer::duration    ibc_heartbeat_interval{std::chrono::seconds{3}};
 
       unique_ptr<boost::asio::steady_timer>  ibc_core_timer;
       boost::asio::steady_timer::duration    ibc_core_interval{std::chrono::seconds{3}};
@@ -175,7 +177,7 @@ namespace eosio { namespace ibc {
       ibc_transaction_index         local_origtrxs;
       ibc_transaction_index         local_cashtrxs;
       ibc_section_index             local_sections;
-      std::set<uint32_t>            new_prod_blk_nums;
+      uint32_t                      new_prod_blk_num = 0;
 
       string                        user_agent_name;
       chain_plugin*                 chain_plug = nullptr;
@@ -236,7 +238,6 @@ namespace eosio { namespace ibc {
       incremental_merkle get_brtm_from_cache( uint32_t block_num );
       uint32_t get_safe_head_tslot( );
 
-      void new_prod_blk_num_insert( uint32_t num );
       optional<ibc_trx_rich_info> get_ibc_trx_rich_info( uint32_t block_time_slot, transaction_id_type trx_id, uint64_t table_id );
 
       void check_if_remove_old_data_in_ibc_contracts();
@@ -318,7 +319,7 @@ namespace eosio { namespace ibc {
    constexpr auto     def_send_buffer_size = 1024*1024*def_send_buffer_size_mb;
    constexpr auto     def_max_clients = 10; // 0 for unlimited clients
    constexpr auto     def_max_nodes_per_host = 1;
-   constexpr auto     def_conn_retry_wait = 30;
+   constexpr auto     def_conn_retry_wait = 3;
    constexpr auto     def_txn_expire_wait = std::chrono::seconds(3);
    constexpr auto     def_resp_expected_wait = std::chrono::seconds(5);
    constexpr auto     def_sync_fetch_span = 100;
@@ -813,7 +814,7 @@ namespace eosio { namespace ibc {
 
    void ibc_chain_contract::get_blkrtmkls_tb() {
       const auto& d = app().get_plugin<chain_plugin>().chain().db();
-      const auto* t_id = d.find<chain::table_id_object, chain::by_code_scope_table>(boost::make_tuple(account, account, N(blkrtmkls)));
+      const auto* t_id = d.find<chain::table_id_object, chain::by_code_scope_table>(boost::make_tuple(account, my_impl->relay, N(blkrtmkls)));
       if (t_id != nullptr) {
          const auto &idx = d.get_index<chain::key_value_index, chain::by_scope_primary>();
          decltype(t_id->id) next_tid(t_id->id._id + 1);
@@ -925,48 +926,49 @@ namespace eosio { namespace ibc {
       name account;
    };
 
-   optional<memo_info_type> ibc_token_contract::get_memo_info( const string& memo ){
-      auto get_item = [=]( string item ) -> string {
-         string search = string(" ") + item + "=";
-         auto pos = memo.find( search );
-         decltype(pos) pos_end;
-         if ( pos !=  std::string::npos ){
-            if ( item == "notes" ){
-               pos_end = memo.size();
-            } else {
-               pos_end = memo.find(" ", pos + search.length());
-               if( pos_end == std::string::npos ) {
-                  pos_end = memo.size();
-               }
-            }
-
-            auto start = pos + search.length();
-            auto count = pos_end - start;
-            auto res = memo.substr( start, count );
-            if( res.length() == 0){
-               elog("ibc system error, memo contain incomplete item");
-            }
-            return res;
-         } else {
-            return string();
-         }
-      };
-
-      string receiver_str = get_item("receiver");
-      string r_str = get_item("r");
+   optional<memo_info_type> ibc_token_contract::get_memo_info( const string& memo_str ){
 
       memo_info_type info;
-      if ( receiver_str != string() ){
-         info.receiver = name( receiver_str );
+
+      string memo = memo_str;
+      trim( memo );
+
+      // --- get receiver ---
+      auto pos = memo.find("@");
+      if ( pos == std::string::npos ){
+         elog("memo format error, didn't find charactor \'@\' in memo");
+         return optional<memo_info_type>();
+      }
+      
+      string receiver_str = memo.substr( 0, pos );
+      trim( receiver_str );
+      info.receiver = name( receiver_str );
+
+      // --- trim ---
+      memo = memo.substr( pos + 1 );
+      trim( memo );
+
+      // --- get chain name and notes ---
+      pos = memo.find(" ");
+      if ( pos == std::string::npos ){
+         info.chain = name( memo );
+         info.notes = "";
       } else {
-         if(  r_str == string() ){
-            elog("ibc system error, none of \"receiver\" or \"r\" is provided");
-            return optional<memo_info_type>();
-         }
-         info.receiver = name( r_str );
+         info.chain = name( memo.substr(0,pos) );
+         info.notes = memo.substr( pos + 1 );
+         trim( info.notes );
       }
 
-      info.notes = get_item("notes");
+      if ( info.receiver == name() ){
+         elog("memo format error, receiver not provided in memo");
+         return optional<memo_info_type>();
+      }
+
+      if ( info.chain == name() ){
+         elog("memo format error, chain not provided in memo");
+         return optional<memo_info_type>();
+      }
+      
       return info;
    }
 
@@ -984,6 +986,8 @@ namespace eosio { namespace ibc {
             if ( obj.ibc_contract != name() && obj.active ){
                c_state = working;
             }
+         } else {
+            dlog("get token contract global_state_singleton failed");
          }
       }
       state = c_state;
@@ -994,7 +998,7 @@ namespace eosio { namespace ibc {
       if ( raw ){
          return range;
       }
-      uint64_t safe_tslot = my_impl->get_safe_head_tslot();
+      uint64_t safe_tslot = my_impl->get_safe_head_tslot() + DiffOfTrxBeforeMinDepth;
 
       chain_apis::read_only::get_table_rows_params par;
       par.json = true;  // must be true
@@ -1048,7 +1052,7 @@ namespace eosio { namespace ibc {
       if ( raw ){
          return range;
       }
-      uint64_t safe_tslot = my_impl->get_safe_head_tslot();
+      uint64_t safe_tslot = my_impl->get_safe_head_tslot() + DiffOfTrxBeforeMinDepth;
 
       chain_apis::read_only::get_table_rows_params par;
       par.json = true;  // must be true
@@ -1168,7 +1172,7 @@ namespace eosio { namespace ibc {
             elog("push cash transaction failed, index ${i}",("i",index));
          } else {
             auto trx_id = result.get<chain_apis::read_write::push_transaction_results>().transaction_id;
-            ilog("pushed cash transaction: ${id}, index ${idx}", ( "id", trx_id )("idx", index));
+            dlog("pushed cash transaction: ${id}, index ${idx}", ( "id", trx_id )("idx", index));
             next_seq_num += 1;
          }
 
@@ -1177,7 +1181,7 @@ namespace eosio { namespace ibc {
          if (next_index < params->size()) {
             push_cash_recurse( next_index, params, next_seq_num );
          } else {
-            ilog("all ${sum} cash transactions have tried to push, which belongs to blocks [${f},${t}]",
+            dlog("all ${sum} cash transactions have tried to push, which belongs to blocks [${f},${t}]",
                  ("sum",params->size())("f",params->front().orig_trx_block_num)("t",params->back().orig_trx_block_num));
          }
       };
@@ -1258,14 +1262,14 @@ namespace eosio { namespace ibc {
             return;
          } else {
             auto trx_id = result.get<chain_apis::read_write::push_transaction_results>().transaction_id;
-            ilog("pushed cashconfirm transaction: ${id}, index ${idx}", ( "id", trx_id )("idx", index));
+            dlog("pushed cashconfirm transaction: ${id}, index ${idx}", ( "id", trx_id )("idx", index));
          }
 
          int next_index = index + 1;
          if (next_index < params->size()) {
             push_cashconfirm_recurse( next_index, params );
          } else {
-            ilog("successfully pushed all ${sum} cashconfirm transactions, which belongs to blocks [${f},${t}]",
+            dlog("successfully pushed all ${sum} cashconfirm transactions, which belongs to blocks [${f},${t}]",
                ("sum",params->size())("f",params->front().cash_trx_block_num)("t",params->back().cash_trx_block_num));
          }
       };
@@ -1984,19 +1988,19 @@ namespace eosio { namespace ibc {
    }
 
    void ibc_plugin_impl::irreversible_block(const block_state_ptr& block) {
-      /*fc_dlog(logger,"signaled, block: ${n}, id: ${id}",("n", block->block_num)("id", block->id));*/
+      /* fc_dlog(logger,"signaled, block: ${n}, id: ${id}",("n", block->block_num)("id", block->id)); */
       blockroot_merkle_type brtm;
       brtm.block_num = block->block_num;
       brtm.merkle = block->blockroot_merkle;
 
       blockroot_merkle_cache.push_back( brtm );
-      if ( blockroot_merkle_cache.size() > 3600*BlocksPerSecond*2 ){ // two hours
+      if ( blockroot_merkle_cache.size() > 3600*BlocksPerSecond*24 ){ // one day
          blockroot_merkle_cache.erase( blockroot_merkle_cache.begin() );
       }
 
-      static constexpr uint32_t range = 2 << 13;
+      static constexpr uint32_t range = 1 << 10; // 1024
       if ( block->block_num % range == 0 ){
-         fc_dlog(logger,"new mkl");
+         ilog("push block ${n}'s block_merkle to chain contract",("n",block->block_num ));
          blockroot_merkle_type par;
          par.block_num = block->block_num;
          par.merkle = block->blockroot_merkle;
@@ -2166,7 +2170,11 @@ namespace eosio { namespace ibc {
    void ibc_plugin_impl::handle_message( connection_ptr c, const ibc_heartbeat_message &msg) {
       peer_ilog(c, "received ibc_heartbeat_message");
 
-      idump((msg.origtrxs_table_id_range)(msg.cashtrxs_table_seq_num_range));
+      dlog("msg.origtrxs_table_id_range: [${of},${ot}] msg.cashtrxs_table_seq_num_range: [${cf},${ct}] msg.new_producers_block_num: ${n}",
+           (msg.origtrxs_table_id_range.first)(msg.origtrxs_table_id_range.second)
+           (msg.cashtrxs_table_seq_num_range.first)(msg.cashtrxs_table_seq_num_range.second)
+           (msg.new_producers_block_num));
+      // idump((msg.origtrxs_table_id_range)(msg.cashtrxs_table_seq_num_range)(msg.new_producers_block_num));
 
       // step one: check ibc_chain_state and lwcls
       if ( msg.ibc_chain_state == deployed ) {  // send lwc_init_message
@@ -2177,7 +2185,7 @@ namespace eosio { namespace ibc {
          uint32_t depth = 200;
          block_state_ptr p;
          while ( p == block_state_ptr() && depth >= 25 ){
-            uint32_t check_num = std::max( head_num - depth, 1 );
+            uint32_t check_num = std::max( head_num - depth, uint32_t(1) );
             p = cc.fetch_block_state_by_number( check_num );
             if ( p == block_state_ptr() ){
                ilog("didn't get block_state_ptr of block num: ${n}", ("n", check_num ));
@@ -2283,7 +2291,7 @@ namespace eosio { namespace ibc {
 
       // step four: check new_producers_block_num
       if ( msg.new_producers_block_num ){
-         new_prod_blk_num_insert( msg.new_producers_block_num );
+         new_prod_blk_num = msg.new_producers_block_num;
       }
    }
 
@@ -2306,11 +2314,11 @@ namespace eosio { namespace ibc {
       if ( msg.start_block_num >= safe_blk_num || rq_length == 0 ){
          return;
       }
-      if ( rq_length >= MaxSectionLength && safe_blk_num - msg.start_block_num < MaxSectionLength ){
+      if ( rq_length >= MaxSendSectionLength && safe_blk_num - msg.start_block_num < MaxSendSectionLength ){
          // ilog("have not enough data");
          return;
       }
-      if  ( rq_length < MaxSectionLength && msg.end_block_num > safe_blk_num ) {
+      if  ( rq_length < MaxSendSectionLength && msg.end_block_num > safe_blk_num ) {
          // ilog("have not enough data");
          return;
       }
@@ -2318,10 +2326,10 @@ namespace eosio { namespace ibc {
       uint32_t end_num = std::min( safe_blk_num, msg.end_block_num );
 
       if ( msg.end_block_num > safe_blk_num ){
-         end_num = msg.start_block_num + ((end_num - msg.start_block_num ) / MaxSectionLength) * MaxSectionLength;
+         end_num = msg.start_block_num + ((end_num - msg.start_block_num ) / MaxSendSectionLength) * MaxSendSectionLength;
       }
 
-      for ( uint32_t start_num = msg.start_block_num; start_num < end_num; start_num += MaxSectionLength ){
+      for ( uint32_t start_num = msg.start_block_num; start_num < end_num; start_num += MaxSendSectionLength ){
          lwc_section_data_message ret_msg;
          uint32_t check_num = start_num;
 
@@ -2338,45 +2346,57 @@ namespace eosio { namespace ibc {
 
             // search form cache
             incremental_merkle mkl = get_brtm_from_cache( start_num );
-            if ( mkl._node_count != 0 ){
+            if ( mkl._node_count != 0 && mkl._active_nodes.size() > 0 ){
                ret_msg.blockroot_merkle = mkl;
                ret_msg.headers.push_back( *sbp );
-            } else {
-               // calculate it by known blockroot_merkles
+            } else {    // when node restart
                ilog("didn't find block_state of number ${n} in forkdb, calculate it by known blockroot_merkles",("n",check_num));
+               
                chain_contract->get_blkrtmkls_tb();
-               blockroot_merkle_type start_point;
+               blockroot_merkle_type walk_point;
+
                for ( auto brtm : chain_contract->history_blockroot_merkles ) {
-                  if ( brtm.block_num <= check_num ){
-                     start_point = brtm;
+                  if ( walk_point.block_num < brtm.block_num && brtm.block_num <= check_num ){
+                     walk_point = brtm;
                   }
                }
-               if ( start_point.block_num != 0 && check_num - start_point.block_num <= 3600*24*2*BlocksPerSecond ){ // 2 days
-                  while( start_point.block_num < check_num ){
-                     start_point.merkle.append( chain_plug->chain().get_block_id_for_num( start_point.block_num ) );
-                     start_point.block_num += 1;
+
+               if ( walk_point.block_num == 0 ){
+                  elog("can not find fit blockroot_merkle to calculation blockroot_merkle of blcok ${n}", ("n",check_num));
+                  return;
+               }
+
+               ilog("find block ${b} with fit blockroot_merkle",("b",walk_point.block_num));
+
+               static const uint32_t max_interval_blocks = BlocksPerSecond * 3600; // 1 hours
+               if ( check_num - walk_point.block_num <= max_interval_blocks ){
+                  while( walk_point.block_num < check_num ){
+                     walk_point.merkle.append( chain_plug->chain().get_block_id_for_num( walk_point.block_num ) );
+                     walk_point.block_num += 1;
                   }
-                  if (start_point.block_num == check_num ){
-                     ret_msg.blockroot_merkle = start_point.merkle;
-                     ret_msg.headers.push_back( *(chain_plug->chain().fetch_block_by_number(start_point.block_num)) );
+                  if (walk_point.block_num == check_num ){
+                     ret_msg.blockroot_merkle = walk_point.merkle;
+                     ret_msg.headers.push_back( *(chain_plug->chain().fetch_block_by_number(walk_point.block_num)) );
                   } else {
                      elog("internal error, calculate blockroot_merkle of block ${n} failed", ("n",check_num));
                      return;
                   }
                } else {
-                  elog("can not find fit blockroot_merkle to calculation blockroot_merkle of blcok ${n}", ("n",check_num));
+                  elog("available block are too far apart, check_num ${n1}, start_point_num${n2}",("n1",check_num)("n2",walk_point.block_num));
                   return;
                }
             }
          }
          ++check_num;
-         uint32_t tmp_end_num = std::min( start_num + MaxSectionLength - 1, end_num );
+         uint32_t tmp_end_num = std::min( start_num + MaxSendSectionLength - 1, end_num );
          while ( check_num <= tmp_end_num ){
             ret_msg.headers.push_back( *(chain_plug->chain().fetch_block_by_number( check_num )) );
             check_num += 1;
          }
-         peer_ilog(c,"sending lwc_section_data_message, range [${from},${to}]", ("from",start_num)("to",tmp_end_num));
+         peer_ilog(c,"sending lwc_section_data_message, range [${from},${to}], merkle nodes ${nodes}", ("from",start_num)("to",tmp_end_num)("nodes",ret_msg.blockroot_merkle._active_nodes.size()));
          c->enqueue( ret_msg );
+
+         return; // send only once
       }
    }
 
@@ -2392,8 +2412,6 @@ namespace eosio { namespace ibc {
 
       uint32_t msg_first_num = msg.headers.begin()->block_num();
       uint32_t msg_last_num = msg.headers.rbegin()->block_num();
-
-      idump((msg_first_num)(msg_last_num)(ls));
 
       if( msg_last_num <= ls.last && msg.headers.rbegin()->id() == chain_contract->get_chaindb_tb_block_id_by_block_num(msg_last_num) ){
          ilog("lwc_section_data_message has no new data");
@@ -2596,10 +2614,16 @@ namespace eosio { namespace ibc {
    }
 
    incremental_merkle ibc_plugin_impl::get_brtm_from_cache( uint32_t block_num ){
-      if ( blockroot_merkle_cache.begin()->block_num <= block_num && block_num <= blockroot_merkle_cache.rbegin()->block_num ){
+      if ( blockroot_merkle_cache.begin() != blockroot_merkle_cache.end() &&
+      blockroot_merkle_cache.begin()->block_num <= block_num && block_num <= blockroot_merkle_cache.rbegin()->block_num ){
          return blockroot_merkle_cache[ block_num - blockroot_merkle_cache.begin()->block_num  ].merkle;
       }
-      return incremental_merkle();
+
+
+
+      incremental_merkle mkl;
+      mkl._node_count = 0;
+      return mkl;
    }
 
    uint32_t ibc_plugin_impl::get_safe_head_tslot(){
@@ -2659,7 +2683,7 @@ namespace eosio { namespace ibc {
       // check ibc.token contract
       if ( token_contract->state != working ){
          token_contract->get_contract_state();
-         ilog("ibc.token contract not in working state");
+         ilog("ibc.token contract not in working state, current state: ${s}", ("s", contract_state_str( token_contract->state )));
          return false;
       }
 
@@ -2668,6 +2692,8 @@ namespace eosio { namespace ibc {
 
    // get  new producer schedule info for ibc_heartbeat_message to send, check if has new producer schedule since lwcls's last block
    void ibc_plugin_impl::chain_checker( ibc_heartbeat_message& msg ) {
+      msg.new_producers_block_num = 0;
+
       auto lwcls = sum_received_lwcls_info();
       if ( lwcls == lwc_section_type() ){
          ilog("doesn't receive any lwcls infomation from connected peer chain relay nodes");
@@ -2679,53 +2705,25 @@ namespace eosio { namespace ibc {
          return;
       }
 
-      signed_block_ptr check_begin, check_end;
-      try {
-         check_begin = chain_plug->chain().fetch_block_by_number( lwcls.last_num );
-         check_end = chain_plug->chain().fetch_block_by_number( local_safe_head_num );
-      } catch (...) {
-         elog("exception ocurred when fetch block ${n1}, ${n2}",("n1",lwcls.last_num)("n2",local_safe_head_num));
-         return;
+      static uint32_t check_block_num = 0;
+
+      if ( lwcls.last_num > check_block_num ){
+         check_block_num = lwcls.last_num;
       }
-      
-      if ( check_begin == signed_block_ptr() || check_end == signed_block_ptr() ){
-         elog("internal error, fetch block ${n1}, ${n2} failed",("n1",lwcls.last_num)("n2",local_safe_head_num));
-         return;
-      }
-      
+
       auto get_block_ptr = [=]( uint32_t num ) -> signed_block_ptr {
          return chain_plug->chain().fetch_block_by_number(num);
       };
 
-      // check if producer schedule updated
-      if ( check_begin->schedule_version < check_end->schedule_version ){
-         // find the last header whose schedule version equal to check_begin's schedule version, use binary search
-         signed_block_ptr search_first, search_middle, search_last;
-
-         search_first = check_begin;
-         search_last = check_end;
-         search_middle = get_block_ptr( search_first->block_num() + ( search_last->block_num() - search_first->block_num() ) / 2 );
-
-         while( !(search_first->schedule_version == check_begin->schedule_version &&
-                  get_block_ptr( search_first->block_num() + 1 )->schedule_version == check_begin->schedule_version + 1 ) ){
-            if ( search_middle->schedule_version != check_begin->schedule_version  ){
-               search_last = search_middle;
-               search_middle = get_block_ptr( search_first->block_num() + ( search_last->block_num() - search_first->block_num() ) / 2 );
-            } else {
-               search_first = search_middle;
-               search_middle = get_block_ptr( search_first->block_num() + ( search_last->block_num() - search_first->block_num() ) / 2 );
-            }
-
-            if ( search_last->block_num() - search_first->block_num() == 1 ){
-               elog("internal errror, can't find fit block num for the next schedule_version");
-               return;
-            }
-           ilog("---*---");
+      while ( check_block_num < local_safe_head_num ){
+         auto np_opt = get_block_ptr(check_block_num)->new_producers;
+         if ( np_opt.valid() && np_opt->producers.size() > 0 ){
+            msg.new_producers_block_num = check_block_num - 1;
+            ilog("find new_producers_block_num ${n} < ---- new producers ---- >",("n",msg.new_producers_block_num));
+            return;
          }
-         msg.new_producers_block_num = search_first->block_num();
-         return;
+         ++check_block_num;
       }
-      msg.new_producers_block_num = 0;
    }
 
    // get lwcls info for ibc_heartbeat_message to send
@@ -2763,20 +2761,27 @@ namespace eosio { namespace ibc {
 
    void ibc_plugin_impl::start_ibc_heartbeat_timer() {
 
-      if ( should_send_ibc_heartbeat() ){
-         ibc_heartbeat_message msg;
-         chain_checker(msg);
-         ibc_chain_contract_checker(msg);
-         ibc_token_contract_checker(msg);
+      if ( count_open_sockets() != 0 ){
 
-         for( auto &c : connections) {
-            if( c->current() ) {
-               peer_ilog(c,"sending ibc_heartbeat_message");
-               //idump((msg.origtrxs_table_id_range)(msg.cashtrxs_table_seq_num_range)(msg.lwcls));
-               c->enqueue( msg );
+         if ( should_send_ibc_heartbeat() ){
+            ibc_heartbeat_message msg;
+            chain_checker(msg);
+            ibc_chain_contract_checker(msg);
+            ibc_token_contract_checker(msg);
+
+            for( auto &c : connections) {
+               if( c->current() ) {
+                  peer_ilog(c,"sending ibc_heartbeat_message");
+                  //idump((msg.origtrxs_table_id_range)(msg.cashtrxs_table_seq_num_range)(msg.lwcls));
+                  c->enqueue( msg );
+               }
             }
          }
+
+      } else {
+         elog("count_open_sockets() == 0");
       }
+
 
       ibc_heartbeat_timer->expires_from_now (ibc_heartbeat_interval);
       ibc_heartbeat_timer->async_wait ([this](boost::system::error_code ec) {
@@ -2785,15 +2790,6 @@ namespace eosio { namespace ibc {
             wlog ("start_ibc_heartbeat_timer error: ${m}", ("m", ec.message()));
          }
       });
-   }
-
-   void ibc_plugin_impl::new_prod_blk_num_insert( uint32_t num ){
-      if ( new_prod_blk_nums.size() > 10 ){
-         new_prod_blk_nums.erase(new_prod_blk_nums.begin());
-      }
-      if ( new_prod_blk_nums.find(num) != new_prod_blk_nums.end() ){
-         new_prod_blk_nums.insert( num );
-      }
    }
 
    vector<digest_type>  get_merkle_path( vector<digest_type> ids, uint32_t num ) {
@@ -2978,11 +2974,29 @@ namespace eosio { namespace ibc {
     */
 
    void ibc_plugin_impl::ibc_core_checker( ){
+
+      // dump debug info
+      uint32_t orig_begin = 0, orig_end = 0, cash_begin = 0, cash_end = 0;
+      if( local_origtrxs.begin() != local_origtrxs.end() ){
+         orig_begin = local_origtrxs.begin()->table_id;
+         orig_end = local_origtrxs.rbegin()->table_id;
+      }
+      if( local_cashtrxs.begin() != local_cashtrxs.end() ){
+         cash_begin = local_cashtrxs.begin()->table_id;
+         cash_end = local_cashtrxs.rbegin()->table_id;
+      }
+      // ilog("local_origtrxs id range [${of} - ${ot}], local_cashtrxs id range [${cf} - ${ct}]",("of",orig_begin)("ot",orig_end)("cf",cash_begin)("ct",cash_end));
+
+
       if ( chain_contract->state != working || token_contract->state != working ){
          chain_contract->get_contract_state();
          token_contract->get_contract_state();
          return;
       }
+
+      ///< ---- step zero: remove side effect of unapplied trxs ---- >///
+      chain_plug->chain().abort_block();
+      chain_plug->chain().drop_all_unapplied_transactions();
 
       check_if_remove_old_data_in_ibc_contracts();
 
@@ -2995,10 +3009,11 @@ namespace eosio { namespace ibc {
       }
       section_type lwcls = *opt_sctn;
 
-      // calculation the minimun range of lwcls should reach through information of local_origtrxs, local_cashtrxs and new_prod_blk_nums
+      // calculation the minimun range of lwcls should reach through information of local_origtrxs, local_cashtrxs and new_prod_blk_num
       uint32_t min_last_num = lwcls.first + chain_contract->lwc_lib_depth ;
-      if ( !(lwcls.np_num == 0 || lwcls.np_num > chain_plug->chain().head_block_num()) ){
-         min_last_num = lwcls.np_num + 325 + chain_contract->lwc_lib_depth;
+
+      if ( lwcls.np_num != 0 ){
+         min_last_num = std::max( min_last_num, uint32_t( lwcls.np_num + BPScheduleReplaceMinLength + chain_contract->lwc_lib_depth) );
       }
 
       auto _it_orig = local_origtrxs.get<by_block_num>().lower_bound( lwcls.first );
@@ -3015,11 +3030,10 @@ namespace eosio { namespace ibc {
          ++it_cash;
       }
 
-      for ( const auto& num : new_prod_blk_nums ){
-         if ( lwcls.first <= num && num <= min_last_num ){
-            min_last_num = std::max( min_last_num,  num + 325 + chain_contract->lwc_lib_depth );
-         }
+      if ( lwcls.first <= new_prod_blk_num && new_prod_blk_num <= min_last_num ){
+         min_last_num = std::max( min_last_num,  new_prod_blk_num + BPScheduleReplaceMinLength + chain_contract->lwc_lib_depth );
       }
+
 
       // check if lwcls reached the minimum range, if not, send lwc_section_request_message
       bool reached_min_length = true;
@@ -3038,74 +3052,95 @@ namespace eosio { namespace ibc {
 
 
       ///< ---- step two: push all transactions which should validate within this lwcls first to lib block ---- >///
+      if ( lwcls.valid == false ){
+         return;
+      }
 
       static const uint32_t max_push_orig_trxs_per_time = 30;
-      static const uint32_t max_push_cash_trxs_per_time = 50;
+      static const uint32_t max_push_cash_trxs_per_time = 30;
 
       std::vector<ibc_trx_rich_info> orig_trxs_to_push;
       std::vector<ibc_trx_rich_info> cash_trxs_to_push;
-      if ( lwcls.valid ){
-         uint32_t lib_num =  std::max( lwcls.first, lwcls.last > chain_contract->lwc_lib_depth ? lwcls.last - chain_contract->lwc_lib_depth : 1 );
 
-         // --- local_origtrxs ---
-         auto range = token_contract->get_table_cashtrxs_seq_num_range(true);
-         if ( range.first == 0 ){   // range.first == 0 means cashtrxs is empty, range.second shoule alse be 0
-            for( const auto& t : local_origtrxs.get<by_id>( ) ) {
-               if ( lwcls.first <= t.block_num && t.block_num <= lib_num ){
-                  orig_trxs_to_push.push_back( t );
-               }
+      uint32_t lib_num =  std::max( lwcls.first, lwcls.last > chain_contract->lwc_lib_depth ? lwcls.last - chain_contract->lwc_lib_depth : 1 );
+
+      ///< --- local_origtrxs --- >///
+      auto range = token_contract->get_table_cashtrxs_seq_num_range(true);
+      if ( range.first == 0 ){   // range.first == 0 means cashtrxs is empty, range.second shoule alse be 0
+         for( const auto& t : local_origtrxs.get<by_id>( ) ) {
+            if ( lwcls.first <= t.block_num && t.block_num <= lib_num ){
+               orig_trxs_to_push.push_back( t );
             }
-         } else {
-            auto cash_opt = token_contract->get_table_cashtrxs_trx_info_by_seq_num( range.second );
-            if ( cash_opt.valid() ){
-               auto orig_trx_id = cash_opt->orig_trx_id;
-               auto it_trx_id = local_origtrxs.get<by_trx_id>().find( orig_trx_id );
-               auto it = local_origtrxs.project<0>(it_trx_id);
-               if ( it != local_origtrxs.end() ){
+         }
+      } else {
+         auto cash_opt = token_contract->get_table_cashtrxs_trx_info_by_seq_num( range.second );
+         if ( cash_opt.valid() ){
+            auto orig_trx_id = cash_opt->orig_trx_id;
+            auto it_trx_id = local_origtrxs.get<by_trx_id>().find( orig_trx_id );
+            auto it = local_origtrxs.project<0>(it_trx_id);
+            if ( it != local_origtrxs.end() ){
+               ++it;
+               while ( it != local_origtrxs.end() && lwcls.first <= it->block_num && it->block_num <= lib_num ){
+                  orig_trxs_to_push.push_back( *it );
                   ++it;
-                  while ( it != local_origtrxs.end() && it->block_num <= lib_num ){
-                     orig_trxs_to_push.push_back( *it );
-                     ++it;
-                  }
                }
-               else { elog("internal error, can not find original transacton infomation form local_origtrxs"); }
-            } else { ilog("internal error, failed to get cash transaction infomation of seq_num ${n}",("n",range.second)); }
-         }
-
-         if ( ! orig_trxs_to_push.empty() ){
-            std::vector<ibc_trx_rich_info> to_push;
-            if ( orig_trxs_to_push.size() > max_push_orig_trxs_per_time ){
-               to_push = std::vector<ibc_trx_rich_info>( orig_trxs_to_push.begin(), orig_trxs_to_push.begin() + max_push_orig_trxs_per_time );
-            } else {
-               to_push = orig_trxs_to_push;
+            } else { // maybe happen when restart ibc_plugin node
+               wlog("can not find original transacton infomation form local_origtrxs, restart nodeos?");
+               auto it_blk_num = local_origtrxs.get<by_block_num>().lower_bound( cash_opt->orig_trx_block_num + 1 );
+               it = local_origtrxs.project<0>(it_blk_num);
+               while ( it != local_origtrxs.end() && lwcls.first <= it->block_num && it->block_num <= lib_num ){
+                  orig_trxs_to_push.push_back( *it );
+                  ++it;
+               }
             }
-            ilog("---------orig_trxs_to_push to push size ${n}",("n",to_push.size()));
-            token_contract->push_cash_trxs( to_push, range.second + 1 );  // todo: increase robustness, retry when failed.
+         } else { ilog("internal error, failed to get cash transaction information of seq_num ${n}",("n",range.second)); }
+      }
+
+      if ( ! orig_trxs_to_push.empty() ){
+         std::vector<ibc_trx_rich_info> to_push;
+         if ( orig_trxs_to_push.size() > max_push_orig_trxs_per_time ){
+            to_push = std::vector<ibc_trx_rich_info>( orig_trxs_to_push.begin(), orig_trxs_to_push.begin() + max_push_orig_trxs_per_time );
+         } else {
+            to_push = orig_trxs_to_push;
          }
 
-         // --- local_cashtrxs ---
-         auto gm_opt = token_contract->get_global_mutable_singleton();
-         if ( !gm_opt.valid() ){
-            elog("internal error, failed to get global_mutable_singleton");
-            return;
-         }
-         uint32_t last_cash_seq_num = gm_opt->cash_seq_num;
-         auto it = local_cashtrxs.get<by_id>().find( last_cash_seq_num + 1 );
-         while ( it != local_cashtrxs.end() && it->block_num <= lib_num ){
-            cash_trxs_to_push.push_back( *it );
-            ++it;
-         }
+         static uint64_t highest_idx = 0;
+         static uint32_t times = 0;
 
-         if ( !cash_trxs_to_push.empty() ){
-            std::vector<ibc_trx_rich_info> to_push;
-            if ( cash_trxs_to_push.size() > max_push_cash_trxs_per_time ){
-               to_push = std::vector<ibc_trx_rich_info>( cash_trxs_to_push.begin(), cash_trxs_to_push.begin() + max_push_cash_trxs_per_time );
-            } else {
-               to_push = cash_trxs_to_push;
-            }
-            ilog("---------cash_trxs_to_push to push size ${n}",("n",to_push.size()));
-            token_contract->push_cashconfirm_trxs( to_push, last_cash_seq_num + 1 );
+         if ( to_push.back().table_id != highest_idx ){
+            highest_idx = to_push.back().table_id;
+            times = 1;
+         } else {
+            times += 1;
          }
+         if ( times <= 2 ){
+            ilog("---------orig_trxs_to_push to push size ${n}, retry times ${try}",("n",to_push.size())("try",times));
+            token_contract->push_cash_trxs( to_push, range.second + 1 );
+         }
+      }
+
+      ///< --- local_cashtrxs --- >///
+      auto gm_opt = token_contract->get_global_mutable_singleton();
+      if ( !gm_opt.valid() ){
+         elog("internal error, failed to get global_mutable_singleton");
+         return;
+      }
+      uint32_t last_cash_seq_num = gm_opt->cash_seq_num;
+      auto it = local_cashtrxs.get<by_id>().find( last_cash_seq_num + 1 );
+      while ( it != local_cashtrxs.end() && lwcls.first <= it->block_num && it->block_num <= lib_num ){
+         cash_trxs_to_push.push_back( *it );
+         ++it;
+      }
+
+      if ( !cash_trxs_to_push.empty() ){
+         std::vector<ibc_trx_rich_info> to_push;
+         if ( cash_trxs_to_push.size() > max_push_cash_trxs_per_time ){
+            to_push = std::vector<ibc_trx_rich_info>( cash_trxs_to_push.begin(), cash_trxs_to_push.begin() + max_push_cash_trxs_per_time );
+         } else {
+            to_push = cash_trxs_to_push;
+         }
+         ilog("---------cash_trxs_to_push to push size ${n}",("n",to_push.size()));
+         token_contract->push_cashconfirm_trxs( to_push, last_cash_seq_num + 1 );
       }
 
 
@@ -3119,11 +3154,6 @@ namespace eosio { namespace ibc {
       }
 
       // --- check local_cashtrxs ---
-      auto gm_opt = token_contract->get_global_mutable_singleton();
-      if ( !gm_opt.valid() ){
-         elog("internal error, failed to get global_mutable_singleton");
-         return;
-      }
       if ( cash_trxs_to_push.empty() ){
          cash_b = true;
       } else {
@@ -3138,7 +3168,7 @@ namespace eosio { namespace ibc {
       }
 
       // --- summary ---
-      if ( ! (orig_b && cash_b && reached_min_length ) ){
+      if ( ! (reached_min_length && orig_b && cash_b ) ){
          return;
       }
 
@@ -3167,14 +3197,12 @@ namespace eosio { namespace ibc {
             //ilog("cashtrxs has new trxs, start block ${n}",("n",start_blk_num));
          }
 
-         // --- check new_prod_blk_nums ---
-         for ( const auto& num : new_prod_blk_nums ){
-            if ( lwcls.last <= num && num <= start_blk_num ){
-               if ( start_blk_num != 0 ){
-                  start_blk_num = std::min( start_blk_num, num );
-               } else {
-                  start_blk_num = num;
-               }
+         // --- check new_prod_blk_num ---
+         if ( new_prod_blk_num >= lwcls.last ){
+            if ( start_blk_num != 0 ){
+               start_blk_num = std::min( start_blk_num, new_prod_blk_num );
+            } else {
+               start_blk_num = new_prod_blk_num;
             }
          }
 
@@ -3207,7 +3235,17 @@ namespace eosio { namespace ibc {
    }
 
    void ibc_plugin_impl::start_ibc_core_timer( ){
-      ibc_core_checker();
+      if ( count_open_sockets() != 0 ){
+
+         // this is used for let ibc_heartbeat_timer work and exchange basic infomation first.
+         static int i = 0;
+         if ( i < 3 ){ ++i; }
+         if ( i >= 3 ){
+            ibc_core_checker();
+         }
+      } else {
+         elog("count_open_sockets() == 0");
+      }
 
       ibc_core_timer->expires_from_now( ibc_core_interval );
       ibc_core_timer->async_wait( [this](boost::system::error_code ec) {
