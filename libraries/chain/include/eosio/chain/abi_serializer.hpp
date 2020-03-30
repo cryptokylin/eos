@@ -1,7 +1,3 @@
-/**
- *  @file
- *  @copyright defined in eos/LICENSE.txt
- */
 #pragma once
 #include <eosio/chain/abi_def.hpp>
 #include <eosio/chain/trace.hpp>
@@ -36,28 +32,31 @@ struct abi_serializer {
    abi_serializer( const abi_def& abi, const fc::microseconds& max_serialization_time );
    void set_abi(const abi_def& abi, const fc::microseconds& max_serialization_time);
 
-   type_name resolve_type(const type_name& t)const;
-   bool      is_array(const type_name& type)const;
-   bool      is_optional(const type_name& type)const;
-   bool      is_type(const type_name& type, const fc::microseconds& max_serialization_time)const;
-   bool      is_builtin_type(const type_name& type)const;
-   bool      is_integer(const type_name& type) const;
-   int       get_integer_size(const type_name& type) const;
-   bool      is_struct(const type_name& type)const;
-   type_name fundamental_type(const type_name& type)const;
+   /// @return string_view of `t` or internal string type
+   std::string_view resolve_type(const std::string_view& t)const;
+   bool      is_array(const std::string_view& type)const;
+   bool      is_optional(const std::string_view& type)const;
+   bool      is_type(const std::string_view& type, const fc::microseconds& max_serialization_time)const;
+   bool      is_builtin_type(const std::string_view& type)const;
+   bool      is_integer(const std::string_view& type) const;
+   int       get_integer_size(const std::string_view& type) const;
+   bool      is_struct(const std::string_view& type)const;
 
-   const struct_def& get_struct(const type_name& type)const;
+   /// @return string_view of `type`
+   std::string_view fundamental_type(const std::string_view& type)const;
+
+   const struct_def& get_struct(const std::string_view& type)const;
 
    type_name get_action_type(name action)const;
    type_name get_table_type(name action)const;
 
    optional<string>  get_error_message( uint64_t error_code )const;
 
-   fc::variant binary_to_variant( const type_name& type, const bytes& binary, const fc::microseconds& max_serialization_time, bool short_path = false )const;
-   fc::variant binary_to_variant( const type_name& type, fc::datastream<const char*>& binary, const fc::microseconds& max_serialization_time, bool short_path = false )const;
+   fc::variant binary_to_variant( const std::string_view& type, const bytes& binary, const fc::microseconds& max_serialization_time, bool short_path = false )const;
+   fc::variant binary_to_variant( const std::string_view& type, fc::datastream<const char*>& binary, const fc::microseconds& max_serialization_time, bool short_path = false )const;
 
-   bytes       variant_to_binary( const type_name& type, const fc::variant& var, const fc::microseconds& max_serialization_time, bool short_path = false )const;
-   void        variant_to_binary( const type_name& type, const fc::variant& var, fc::datastream<char*>& ds, const fc::microseconds& max_serialization_time, bool short_path = false )const;
+   bytes       variant_to_binary( const std::string_view& type, const fc::variant& var, const fc::microseconds& max_serialization_time, bool short_path = false )const;
+   void        variant_to_binary( const std::string_view& type, const fc::variant& var, fc::datastream<char*>& ds, const fc::microseconds& max_serialization_time, bool short_path = false )const;
 
    template<typename T, typename Resolver>
    static void to_variant( const T& o, fc::variant& vo, Resolver resolver, const fc::microseconds& max_serialization_time );
@@ -82,8 +81,8 @@ struct abi_serializer {
       return false;
    }
 
-   typedef std::function<fc::variant(fc::datastream<const char*>&, bool, bool)>  unpack_function;
-   typedef std::function<void(const fc::variant&, fc::datastream<char*>&, bool, bool)>  pack_function;
+   typedef std::function<fc::variant(fc::datastream<const char*>&, bool, bool, const fc::time_point&)>  unpack_function;
+   typedef std::function<void(const fc::variant&, fc::datastream<char*>&, bool, bool, const fc::time_point&)>  pack_function;
 
    void add_specialized_unpack_pack( const string& name, std::pair<abi_serializer::unpack_function, abi_serializer::pack_function> unpack_pack );
 
@@ -91,27 +90,27 @@ struct abi_serializer {
 
 private:
 
-   map<type_name, type_name>     typedefs;
-   map<type_name, struct_def>    structs;
-   map<name,type_name>           actions;
-   map<name,type_name>           tables;
-   map<uint64_t, string>         error_messages;
-   map<type_name, variant_def>   variants;
+   map<type_name, type_name, std::less<>>     typedefs;
+   map<type_name, struct_def, std::less<>>    structs;
+   map<name,type_name>                        actions;
+   map<name,type_name>                        tables;
+   map<uint64_t, string>                      error_messages;
+   map<type_name, variant_def, std::less<>>   variants;
 
-   map<type_name, pair<unpack_function, pack_function>> built_in_types;
+   map<type_name, pair<unpack_function, pack_function>, std::less<>> built_in_types;
    void configure_built_in_types();
 
-   fc::variant _binary_to_variant( const type_name& type, const bytes& binary, impl::binary_to_variant_context& ctx )const;
-   fc::variant _binary_to_variant( const type_name& type, fc::datastream<const char*>& binary, impl::binary_to_variant_context& ctx )const;
-   void        _binary_to_variant( const type_name& type, fc::datastream<const char*>& stream,
+   fc::variant _binary_to_variant( const std::string_view& type, const bytes& binary, impl::binary_to_variant_context& ctx )const;
+   fc::variant _binary_to_variant( const std::string_view& type, fc::datastream<const char*>& binary, impl::binary_to_variant_context& ctx )const;
+   void        _binary_to_variant( const std::string_view& type, fc::datastream<const char*>& stream,
                                    fc::mutable_variant_object& obj, impl::binary_to_variant_context& ctx )const;
 
-   bytes       _variant_to_binary( const type_name& type, const fc::variant& var, impl::variant_to_binary_context& ctx )const;
-   void        _variant_to_binary( const type_name& type, const fc::variant& var,
+   bytes       _variant_to_binary( const std::string_view& type, const fc::variant& var, impl::variant_to_binary_context& ctx )const;
+   void        _variant_to_binary( const std::string_view& type, const fc::variant& var,
                                    fc::datastream<char*>& ds, impl::variant_to_binary_context& ctx )const;
 
-   static type_name _remove_bin_extension(const type_name& type);
-   bool _is_type( const type_name& type, impl::abi_traverse_context& ctx )const;
+   static std::string_view _remove_bin_extension(const std::string_view& type);
+   bool _is_type( const std::string_view& type, impl::abi_traverse_context& ctx )const;
 
    void validate( impl::abi_traverse_context& ctx )const;
 
@@ -124,14 +123,23 @@ namespace impl {
 
    struct abi_traverse_context {
       abi_traverse_context( fc::microseconds max_serialization_time )
-      : max_serialization_time( max_serialization_time ), deadline( fc::time_point::now() + max_serialization_time ), recursion_depth(0)
-      {}
+      : max_serialization_time( max_serialization_time ),
+        deadline( fc::time_point::now() ), // init to now, updated below
+        recursion_depth(0)
+      {
+         if( max_serialization_time > fc::microseconds::maximum() - deadline.time_since_epoch() ) {
+            deadline = fc::time_point::maximum();
+         } else {
+            deadline += max_serialization_time;
+         }
+      }
 
       abi_traverse_context( fc::microseconds max_serialization_time, fc::time_point deadline )
       : max_serialization_time( max_serialization_time ), deadline( deadline ), recursion_depth(0)
       {}
 
       void check_deadline()const;
+      const fc::time_point& get_deadline()const { return deadline; }
 
       fc::scoped_exit<std::function<void()>> enter_scope();
 
@@ -176,25 +184,25 @@ namespace impl {
    using path_item = static_variant<empty_path_item, array_index_path_item, field_path_item, variant_path_item>;
 
    struct abi_traverse_context_with_path : public abi_traverse_context {
-      abi_traverse_context_with_path( const abi_serializer& abis, fc::microseconds max_serialization_time, const type_name& type )
+      abi_traverse_context_with_path( const abi_serializer& abis, fc::microseconds max_serialization_time, const std::string_view& type )
       : abi_traverse_context( max_serialization_time ), abis(abis)
       {
          set_path_root(type);
       }
 
-      abi_traverse_context_with_path( const abi_serializer& abis, fc::microseconds max_serialization_time, fc::time_point deadline, const type_name& type )
+      abi_traverse_context_with_path( const abi_serializer& abis, fc::microseconds max_serialization_time, fc::time_point deadline, const std::string_view& type )
       : abi_traverse_context( max_serialization_time, deadline ), abis(abis)
       {
          set_path_root(type);
       }
 
-      abi_traverse_context_with_path( const abi_serializer& abis, const abi_traverse_context& ctx, const type_name& type )
+      abi_traverse_context_with_path( const abi_serializer& abis, const abi_traverse_context& ctx, const std::string_view& type )
       : abi_traverse_context(ctx), abis(abis)
       {
          set_path_root(type);
       }
 
-      void set_path_root( const type_name& type );
+      void set_path_root( const std::string_view& type );
 
       fc::scoped_exit<std::function<void()>> push_to_path( const path_item& item );
 
@@ -205,7 +213,7 @@ namespace impl {
 
       string get_path_string()const;
 
-      string maybe_shorten( const string& str );
+      string maybe_shorten( const std::string_view& str );
 
    protected:
       const abi_serializer&  abis;
@@ -230,6 +238,9 @@ namespace impl {
       bool                   allow_extensions = true;
    };
 
+   /// limits the string size to default max_length of output_name
+   string limit_size( const std::string_view& str );
+
    /**
     * Determine if a type contains ABI related info, perhaps deeply nested
     * @tparam T - the type to check
@@ -240,7 +251,6 @@ namespace impl {
              std::is_same<T, packed_transaction>::value ||
              std::is_same<T, transaction_trace>::value ||
              std::is_same<T, transaction_receipt>::value ||
-             std::is_same<T, base_action_trace>::value ||
              std::is_same<T, action_trace>::value ||
              std::is_same<T, signed_transaction>::value ||
              std::is_same<T, signed_block>::value ||
@@ -364,6 +374,8 @@ namespace impl {
 
       /**
        * overload of to_variant_object for actions
+       *
+       * This matches the FC_REFLECT for this type, but this is provided to extract the contents of act.data
        * @tparam Resolver
        * @param act
        * @param resolver
@@ -372,6 +384,7 @@ namespace impl {
       template<typename Resolver>
       static void add( mutable_variant_object &out, const char* name, const action& act, Resolver resolver, abi_traverse_context& ctx )
       {
+         static_assert(fc::reflector<action>::total_member_count == 4);
          auto h = ctx.enter_scope();
          mutable_variant_object mvo;
          mvo("account", act.account);
@@ -406,6 +419,8 @@ namespace impl {
 
       /**
        * overload of to_variant_object for packed_transaction
+       *
+       * This matches the FC_REFLECT for this type, but this is provided to allow extracting the contents of ptrx.transaction
        * @tparam Resolver
        * @param act
        * @param resolver
@@ -414,16 +429,99 @@ namespace impl {
       template<typename Resolver>
       static void add( mutable_variant_object &out, const char* name, const packed_transaction& ptrx, Resolver resolver, abi_traverse_context& ctx )
       {
+         static_assert(fc::reflector<packed_transaction>::total_member_count == 4);
          auto h = ctx.enter_scope();
          mutable_variant_object mvo;
          auto trx = ptrx.get_transaction();
          mvo("id", trx.id());
-         mvo("signatures", ptrx.signatures);
-         mvo("compression", ptrx.compression);
-         mvo("packed_context_free_data", ptrx.packed_context_free_data);
+         mvo("signatures", ptrx.get_signatures());
+         mvo("compression", ptrx.get_compression());
+         mvo("packed_context_free_data", ptrx.get_packed_context_free_data());
          mvo("context_free_data", ptrx.get_context_free_data());
-         mvo("packed_trx", ptrx.packed_trx);
+         mvo("packed_trx", ptrx.get_packed_transaction());
          add(mvo, "transaction", trx, resolver, ctx);
+
+         out(name, std::move(mvo));
+      }
+
+      /**
+       * overload of to_variant_object for transaction
+       *
+       * This matches the FC_REFLECT for this type, but this is provided to allow extracting the contents of trx.transaction_extensions
+       */
+      template<typename Resolver>
+      static void add( mutable_variant_object &out, const char* name, const transaction& trx, Resolver resolver, abi_traverse_context& ctx )
+      {
+         static_assert(fc::reflector<transaction>::total_member_count == 9);
+         auto h = ctx.enter_scope();
+         mutable_variant_object mvo;
+         mvo("expiration", trx.expiration);
+         mvo("ref_block_num", trx.ref_block_num);
+         mvo("ref_block_prefix", trx.ref_block_prefix);
+         mvo("max_net_usage_words", trx.max_net_usage_words);
+         mvo("max_cpu_usage_ms", trx.max_cpu_usage_ms);
+         mvo("delay_sec", trx.delay_sec);
+         add(mvo, "context_free_actions", trx.context_free_actions, resolver, ctx);
+         add(mvo, "actions", trx.actions, resolver, ctx);
+
+         // process contents of block.transaction_extensions
+         auto exts = trx.validate_and_extract_extensions();
+         if (exts.count(deferred_transaction_generation_context::extension_id()) > 0) {
+            const auto& deferred_transaction_generation = exts.lower_bound(deferred_transaction_generation_context::extension_id())->second.get<deferred_transaction_generation_context>();
+            mvo("deferred_transaction_generation", deferred_transaction_generation);
+         }
+
+         out(name, std::move(mvo));
+      }
+
+      /**
+       * overload of to_variant_object for signed_block
+       *
+       * This matches the FC_REFLECT for this type, but this is provided to allow extracting the contents of
+       * block.header_extensions and block.block_extensions
+       */
+      template<typename Resolver>
+      static void add( mutable_variant_object &out, const char* name, const signed_block& block, Resolver resolver, abi_traverse_context& ctx )
+      {
+         static_assert(fc::reflector<signed_block>::total_member_count == 12);
+         auto h = ctx.enter_scope();
+         mutable_variant_object mvo;
+         mvo("timestamp", block.timestamp);
+         mvo("producer", block.producer);
+         mvo("confirmed", block.confirmed);
+         mvo("previous", block.previous);
+         mvo("transaction_mroot", block.transaction_mroot);
+         mvo("action_mroot", block.action_mroot);
+         mvo("schedule_version", block.schedule_version);
+         mvo("new_producers", block.new_producers);
+
+         // process contents of block.header_extensions
+         flat_multimap<uint16_t, block_header_extension> header_exts = block.validate_and_extract_header_extensions();
+         if ( header_exts.count(protocol_feature_activation::extension_id() > 0) ) {
+            const auto& new_protocol_features = header_exts.lower_bound(protocol_feature_activation::extension_id())->second.get<protocol_feature_activation>().protocol_features;
+            vector<variant> pf_array;
+            pf_array.reserve(new_protocol_features.size());
+            for (auto feature : new_protocol_features) {
+               mutable_variant_object feature_mvo;
+               add(feature_mvo, "feature_digest", feature, resolver, ctx);
+               pf_array.push_back(feature_mvo);
+            }
+            mvo("new_protocol_features", pf_array);
+         }
+         if ( header_exts.count(producer_schedule_change_extension::extension_id())) {
+            const auto& new_producer_schedule = header_exts.lower_bound(producer_schedule_change_extension::extension_id())->second.get<producer_schedule_change_extension>();
+            mvo("new_producer_schedule", new_producer_schedule);
+         }
+
+         mvo("producer_signature", block.producer_signature);
+         add(mvo, "transactions", block.transactions, resolver, ctx);
+
+         // process contents of block.block_extensions
+         auto block_exts = block.validate_and_extract_extensions();
+         if ( block_exts.count(additional_block_signatures_extension::extension_id()) > 0) {
+            const auto& additional_signatures = block_exts.lower_bound(additional_block_signatures_extension::extension_id())->second.get<additional_block_signatures_extension>();
+            mvo("additional_signatures", additional_signatures);
+         }
 
          out(name, std::move(mvo));
       }
@@ -577,32 +675,42 @@ namespace impl {
          const variant_object& vo = v.get_object();
          EOS_ASSERT(vo.contains("signatures"), packed_transaction_type_exception, "Missing signatures");
          EOS_ASSERT(vo.contains("compression"), packed_transaction_type_exception, "Missing compression");
-         from_variant(vo["signatures"], ptrx.signatures);
-         from_variant(vo["compression"], ptrx.compression);
+         std::vector<signature_type> signatures;
+         packed_transaction::compression_type compression;
+         from_variant(vo["signatures"], signatures);
+         from_variant(vo["compression"], compression);
 
-         // TODO: Make this nicer eventually. But for now, if it works... good enough.
+         bytes packed_cfd;
+         std::vector<bytes> cfd;
+         bool use_packed_cfd = false;
+         if( vo.contains("packed_context_free_data") && vo["packed_context_free_data"].is_string() && !vo["packed_context_free_data"].as_string().empty() ) {
+            from_variant(vo["packed_context_free_data"], packed_cfd );
+            use_packed_cfd = true;
+         } else if( vo.contains("context_free_data") ) {
+            from_variant(vo["context_free_data"], cfd);
+         }
+
          if( vo.contains("packed_trx") && vo["packed_trx"].is_string() && !vo["packed_trx"].as_string().empty() ) {
-            from_variant(vo["packed_trx"], ptrx.packed_trx);
-            auto trx = ptrx.get_transaction(); // Validates transaction data provided.
-            if( vo.contains("packed_context_free_data") && vo["packed_context_free_data"].is_string() && !vo["packed_context_free_data"].as_string().empty() ) {
-               from_variant(vo["packed_context_free_data"], ptrx.packed_context_free_data );
-            } else if( vo.contains("context_free_data") ) {
-               vector<bytes> context_free_data;
-               from_variant(vo["context_free_data"], context_free_data);
-               ptrx.set_transaction(trx, context_free_data, ptrx.compression);
+            bytes packed_trx;
+            from_variant(vo["packed_trx"], packed_trx);
+            if( use_packed_cfd ) {
+               ptrx = packed_transaction( std::move( packed_trx ), std::move( signatures ), std::move( packed_cfd ), compression );
+            } else {
+               ptrx = packed_transaction( std::move( packed_trx ), std::move( signatures ), std::move( cfd ), compression );
             }
          } else {
             EOS_ASSERT(vo.contains("transaction"), packed_transaction_type_exception, "Missing transaction");
-            transaction trx;
-            vector<bytes> context_free_data;
-            extract(vo["transaction"], trx, resolver, ctx);
-            if( vo.contains("packed_context_free_data") && vo["packed_context_free_data"].is_string() && !vo["packed_context_free_data"].as_string().empty() ) {
-               from_variant(vo["packed_context_free_data"], ptrx.packed_context_free_data );
-               context_free_data = ptrx.get_context_free_data();
-            } else if( vo.contains("context_free_data") ) {
-               from_variant(vo["context_free_data"], context_free_data);
+            if( use_packed_cfd ) {
+               transaction trx;
+               extract( vo["transaction"], trx, resolver, ctx );
+               ptrx = packed_transaction( std::move(trx), std::move(signatures), std::move(packed_cfd), compression );
+            } else {
+               signed_transaction trx;
+               extract( vo["transaction"], trx, resolver, ctx );
+               trx.signatures = std::move( signatures );
+               trx.context_free_data = std::move(cfd);
+               ptrx = packed_transaction( std::move( trx ), compression );
             }
-            ptrx.set_transaction(trx, context_free_data, ptrx.compression);
          }
       }
    };
@@ -615,11 +723,11 @@ namespace impl {
     * @tparam Reslover - callable with the signature (const name& code_account) -> optional<abi_def>
     */
    template<typename T, typename Resolver>
-   class abi_from_variant_visitor : reflector_verifier_visitor<T>
+   class abi_from_variant_visitor : public reflector_init_visitor<T>
    {
       public:
          abi_from_variant_visitor( const variant_object& _vo, T& v, Resolver _resolver, abi_traverse_context& _ctx )
-         : reflector_verifier_visitor<T>(v)
+         : reflector_init_visitor<T>(v)
          ,_vo(_vo)
          ,_resolver(_resolver)
          ,_ctx(_ctx)
@@ -670,7 +778,7 @@ void abi_serializer::to_variant( const T& o, variant& vo, Resolver resolver, con
    impl::abi_traverse_context ctx(max_serialization_time);
    impl::abi_to_variant::add(mvo, "_", o, resolver, ctx);
    vo = std::move(mvo["_"]);
-} FC_RETHROW_EXCEPTIONS(error, "Failed to serialize type", ("object",o))
+} FC_RETHROW_EXCEPTIONS(error, "Failed to serialize: ${type}", ("type", boost::core::demangle( typeid(o).name() ) ))
 
 template<typename T, typename Resolver>
 void abi_serializer::from_variant( const variant& v, T& o, Resolver resolver, const fc::microseconds& max_serialization_time ) try {

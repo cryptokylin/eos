@@ -9,7 +9,10 @@ import subprocess
 import signal
 
 ###############################################################
+# validate-dirty-db
+#
 # Test for validating the dirty db flag sticks repeated nodeos restart attempts
+#
 ###############################################################
 
 
@@ -74,7 +77,7 @@ try:
         pnodes, topo, delay, chainSyncStrategyStr))
 
     Print("Stand up cluster")
-    if cluster.launch(pnodes, total_nodes, topo=topo, delay=delay, dontBootstrap=True) is False:
+    if cluster.launch(pnodes=pnodes, totalNodes=total_nodes, topo=topo, delay=delay, dontBootstrap=True) is False:
         errorExit("Failed to stand up eos cluster.")
 
     node=cluster.getNode(0)
@@ -91,7 +94,7 @@ try:
         assert(ret)
         assert(isinstance(ret, tuple))
         if not ret[0]:
-            errorExit("Failed to startup nodeos sucessfully on try number %d" % (i))
+            errorExit("Failed to startup nodeos successfully on try number %d" % (i))
         assert(ret[1])
         assert(isinstance(ret[1], dict))
         # pylint: disable=unsubscriptable-object

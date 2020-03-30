@@ -1,7 +1,3 @@
-/**
- *  @file
- *  @copyright defined in eos/LICENSE.txt
- */
 #pragma once
 #include <fc/exception/exception.hpp>
 #include <eosio/chain/types.hpp>
@@ -58,7 +54,7 @@ namespace eosio {
          operator uint64_t()const { return value; }
       };
 
-      class symbol {
+      class symbol : fc::reflect_init {
          public:
 
             static constexpr uint8_t max_precision = 18;
@@ -137,7 +133,7 @@ namespace eosio {
                return ds << s.to_string();
             }
 
-            void reflector_verify()const {
+            void reflector_init()const {
                EOS_ASSERT( decimals() <= max_precision, symbol_type_exception, "precision ${p} should be <= 18", ("p", decimals()) );
                EOS_ASSERT( valid_name(name()), symbol_type_exception, "invalid symbol: ${name}", ("name",name()));
             }
